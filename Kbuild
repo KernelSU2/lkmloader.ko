@@ -19,3 +19,9 @@ ccflags-y += -Wno-unused-function
 ccflags-y += -Wno-builtin-macro-redefined
 ccflags-y += -Wno-strict-prototypes
 ccflags-y += -I$(srctree)
+
+# kbuild 6.10+ fix (ddk): allow $(obj) != $(src) out-of-tree builds
+$(obj)/%.o: $(src)/%.c $(recordmcount_source) FORCE
+	$(call if_changed_rule,cc_o_c)
+	$(call cmd,force_checksrc)
+ccflags-y += -Wno-missing-prototypes

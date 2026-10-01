@@ -34,4 +34,9 @@ module_exit(ko_exit);
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("5ec1cff");
 MODULE_DESCRIPTION("LKM Test");
+#include <linux/version.h>
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 13, 0)
+MODULE_IMPORT_NS("VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver");
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(5, 7, 0)
 MODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver);
+#endif

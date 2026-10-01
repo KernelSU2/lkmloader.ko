@@ -25,6 +25,17 @@
 #include "kernel/module-internal.h"
 #endif
 
+/* kernels without CFI_CLANG (e.g. 4.x/5.x vendor trees) do not define __nocfi */
+#ifndef __nocfi
+#define __nocfi
+#endif
+
+/* arm64 gained __naked far later than arm; the hand-written asm below
+   requires a naked function to keep its own stack frame */
+#ifndef __naked
+#define __naked __attribute__((naked))
+#endif
+
 #ifdef pr_fmt
 #undef pr_fmt
 #define pr_fmt(fmt) "lkmloader: " fmt
@@ -32,6 +43,11 @@
 
 static char *module_path = NULL;
 module_param(module_path, charp, 0644);
+
+/* insmod params forwarded verbatim to the module being loaded
+ * (e.g. "allow_shell=1 bundled=1"), empty by default */
+static char *module_params = NULL;
+module_param(module_params, charp, 0644);
 
 unsigned long (*kallsyms_lookup_name_fn)(const char*);
 struct pt_regs tmp_regs;
@@ -267,9 +283,14 @@ static int __nocfi patch_module(void *buf, size_t len) {
 static long __nocfi load_module(const char __user * params) {
     int (*load_module_fn)(struct load_info *info, const char __user *uargs, int flags)
         = kallsyms_lookup_name_fn("load_module");
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
     ssize_t (*kernel_read_file_fn)(struct file *file, loff_t offset, void **buf,
             size_t buf_size, size_t *file_size,
             enum kernel_read_file_id id) = kallsyms_lookup_name_fn("kernel_read_file");
+#else
+    int (*kernel_read_file_fn)(struct file *file, void **buf, loff_t *size,
+            loff_t max_size, enum kernel_read_file_id id) = kallsyms_lookup_name_fn("kernel_read_file");
+#endif
     struct file *(*filp_open_fn)(const char *, int, umode_t) = kallsyms_lookup_name_fn("filp_open");
     void (*filp_close_fn)(struct file *, fl_owner_t id) = kallsyms_lookup_name_fn("filp_close");
     if (!load_module_fn) {
@@ -300,7 +321,18 @@ static long __nocfi load_module(const char __user * params) {
         return PTR_ERR(f);
     }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
 	len = kernel_read_file_fn(f, 0, &buf, INT_MAX, NULL, READING_MODULE);
+#else
+	{
+		loff_t size = 0;
+		int r;
+		/* Huawei 4.19 kernel_read_file returns 0 on success and only
+		 * stores the byte count in *size (upstream returns pos) */
+		r = kernel_read_file_fn(f, &buf, &size, INT_MAX, READING_MODULE);
+		len = (r < 0) ? r : (int)size;
+	}
+#endif
     if (len < 0) {
         pr_err("read module failed: %d\n", len);
         ret = len;
@@ -323,9 +355,10 @@ out_close_file:
 
 unsigned long __nocfi do_in_task_work_c() {
     struct pt_regs *regs = current_pt_regs();
-    char __user *params = regs->sp - 1;
+    size_t params_len = (module_params ? strlen(module_params) : 0) + 1;
+    char __user *params = (char __user *)regs->sp - params_len;
     long ret;
-    ret = copy_to_user(params, "", sizeof(""));
+    ret = copy_to_user(params, module_params ? module_params : "", params_len);
     if (ret != 0) {
         pr_err("create user params: %ld\n", ret);
     } else {
@@ -480,8 +513,13 @@ int __init __nocfi ko_init(void) {
     unsigned long a;
     a = kallsyms_lookup_name_fn("task_work_add");
     pr_info("kallsyms_lookup_name task_work_add: 0x%lx\n", a);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)
     int (*task_work_add_fn)(struct task_struct *task, struct callback_head *twork,
 			enum task_work_notify_mode mode) = a;
+#else
+    int (*task_work_add_fn)(struct task_struct *task, struct callback_head *twork,
+			bool notify) = a;
+#endif
     a = kallsyms_lookup_name_fn("sys_call_table");
     pr_info("kallsyms_lookup_name sys_call_table: 0x%lx\n", a);
     syscall_table = a;
@@ -502,7 +540,11 @@ int __init __nocfi ko_init(void) {
         return -ENOSYS;
     }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)
     int ret = task_work_add_fn(current, &my_task_work, TWA_RESUME);
+#else
+    int ret = task_work_add_fn(current, &my_task_work, true);
+#endif
     if (ret) {
         pr_err("task_work_add failed: %d\n", ret);
         return -ENOSYS;
@@ -520,4 +562,9 @@ module_exit(ko_exit);
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("5ec1cff");
 MODULE_DESCRIPTION("LKM Loader");
+#include <linux/version.h>
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 13, 0)
+MODULE_IMPORT_NS("VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver");
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(5, 7, 0)
 MODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver);
+#endif
